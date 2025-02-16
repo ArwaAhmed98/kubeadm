@@ -1,0 +1,216 @@
+---
+- hosts: all
+  become: yes
+  tasks:
+    - name: Install dependencies
+      yum:
+        name:
+          - yum-utils
+          - device-mapper-persistent-data
+          - lvm2
+          - iproute-tc
+        state: present
+
+    - name: Disable SELinux
+      shell: |
+        setenforce 0
+        sed -i 's/^SELINUX=enforcing$/SELINUX=permissive/' /etc/selinux/config
+      args:
+        executable: /bin/bash
+
+    - name: Disable swap
+      shell: |
+        swapoff -a
+        sed -i '/swap/d' /etc/fstab
+      args:
+        executable: /bin/bash
+
+    - name: Set sysctl parameters for Kubernetes networking
+      shell: |
+        cat <<EOF | tee /etc/sysctl.d/k8s.conf
+        net.bridge.bridge-nf-call-ip6tables = 1
+        net.bridge.bridge-nf-call-iptables = 1
+        EOF
+        sysctl --system
+      args:
+        executable: /bin/bash
+
+    - name: Install containerd
+      shell: |
+        yum install -y containerd
+        mkdir -p /etc/containerd
+        containerd config default > /etc/containerd/config.toml
+        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+      args:
+        executable: /bin/bash
+
+    - name: Enable and start containerd
+      service:
+        name: containerd
+        enabled: yes
+        state: started
+
+    # - name: Add Kubernetes repository
+    #   shell: |
+    #     cat <<EOF > /etc/yum.repos.d/kubernetes.repo
+    #     [kubernetes]
+    #     name=Kubernetes
+    #     baseurl=https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+    #     enabled=1
+    #     gpgcheck=1
+    #     repo_gpgcheck=1
+    #     gpgkey=https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+    #     EOF
+    #   args:
+    #     executable: /bin/bash
+    
+    
+    - name: Create Kubernetes YUM repository file
+      copy:
+        dest: /etc/yum.repos.d/kubernetes.repo
+        content: |
+          [kubernetes]
+          name=Kubernetes
+          baseurl=https://pkgs.k8s.io/core:/stable:/v1.29/rpm/
+          enabled=1
+          gpgcheck=1
+          gpgkey=https://pkgs.k8s.io/core:/stable:/v1.29/rpm/repodata/repomd.xml.key
+          exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+        mode: '0644'  # Set file permissions
+
+    - name: Set ownership of the Kubernetes YUM repository file
+      file:
+        path: /etc/yum.repos.d/kubernetes.repo
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install kubeadm, kubelet, and kubectl
+      yum:
+        name:
+          - kubelet
+          - kubeadm
+          - kubectl
+        state: present
+        disable_excludes: kubernetes
+
+    - name: Enable kubelet
+      service:
+        name: kubelet
+        enabled: yes
+
+- hosts: master
+  become: yes
+  tasks:
+    - name: Load `br_netfilter` kernel module
+      modprobe:
+        name: br_netfilter
+        state: present
+
+    - name: Ensure `br_netfilter` module loads on boot
+      lineinfile:
+        path: /etc/modules-load.d/k8s.conf
+        line: "br_netfilter"
+        create: yes
+
+    - name: Set sysctl parameters for Kubernetes networking
+      sysctl:
+        name: "{{ item }}"
+        value: "1"
+        sysctl_set: yes
+        state: present
+        reload: yes
+      loop:
+        - net.bridge.bridge-nf-call-iptables
+        - net.bridge.bridge-nf-call-ip6tables
+        - net.ipv4.ip_forward
+
+    - name: Reload sysctl settings
+      command: sysctl --system
+
+    - name: Initialize Kubernetes cluster
+      shell: |
+        kubeadm init --apiserver-advertise-address={{ ansible_default_ipv4.address }} --pod-network-cidr=192.168.0.0/16
+      args:
+        creates: /etc/kubernetes/admin.conf
+
+
+    - name: Create .kube directory
+      file:
+        path: /home/ec2-user/.kube
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: '0755'
+
+    - name: Copy Kubernetes admin config
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ec2-user/.kube/config
+        remote_src: yes
+        owner: ec2-user
+        group: ec2-user
+        mode: '0600'
+
+    - name: Install Calico network plugin
+      shell: |
+        kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+      become_user: ec2-user
+
+    - name: Generate join command
+      shell: |
+        kubeadm token create --print-join-command
+      register: join_node_token
+      changed_when: false
+
+    # - name: Save join command
+    #   copy:
+    #     content: "{{ join_command.stdout }}"
+    #     dest: /tmp/k8s_join.sh
+    #     mode: '0755'
+
+    # - name: Copy PEM file to master node
+    #   copy:
+    #     src: eks-terraform-key.pem
+    #     dest: /home/ec2-user/eks-terraform-key.pem
+    #     owner: ec2-user
+    #     group: ec2-user
+    #     mode: '0400'
+
+
+    # - name: Get the token for joining the worker nodes
+    #   become: yes
+    #   become_user: ec2-user
+    #   shell: kubeadm token create --print-join-command
+    #   register: join_node_token
+    #   delegate_to: master
+
+
+
+- name: Join Worker Nodes to cluster
+  hosts: workers
+  become: true
+  tasks:
+    - name: Load br_netfilter module
+      shell: sudo modprobe br_netfilter
+      become: true
+
+    - name: Enable bridge-nf-call-iptables
+      shell: echo '1' | sudo tee /proc/sys/net/bridge/bridge-nf-call-iptables
+      become: true
+
+    - name: Persist sysctl settings
+      shell: |
+        sudo tee /etc/sysctl.d/k8s.conf <<EOF
+        net.bridge.bridge-nf-call-iptables = 1
+        net.ipv4.ip_forward = 1
+        EOF
+        sudo sysctl --system
+      become: true
+
+    - name: Save join token command as variable
+      ansible.builtin.set_fact:
+        join_node: "{{ hostvars['master'].join_node_token.stdout_lines[0] }}"
+
+    - name: add worker nodes to cluster
+      shell: "sudo {{ join_node }}"
