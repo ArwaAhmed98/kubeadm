@@ -1,0 +1,271 @@
+- name: Setup Kubernetes Cluster
+  hosts: all
+  become: true
+  gather_facts: yes
+  tasks:
+
+
+    - name: Remove old Docker repository list
+      file:
+        path: /etc/apt/sources.list.d/docker.list
+        state: absent
+
+    - name: Remove old Docker GPG key (if exists)
+      file:
+        path: /etc/apt/keyrings/docker.gpg
+        state: absent
+
+    - name: Remove any conflicting Docker repository entries from sources.list
+      shell: sed -i '/download.docker.com/d' /etc/apt/sources.list
+      args:
+        executable: /bin/bash
+
+    - name: Create directory for GPG keys if not exists
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Add correct Docker GPG key
+      shell: |
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg | tee /etc/apt/keyrings/docker.gpg > /dev/null
+        chmod a+r /etc/apt/keyrings/docker.gpg
+      args:
+        executable: /bin/bash
+
+    - name: Add Docker repository correctly
+      shell: |
+        echo "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+      args:
+        executable: /bin/bash
+
+    - name: Update and upgrade all packages to the latest version
+      ansible.builtin.apt:
+        update_cache: true
+        upgrade: dist
+        cache_valid_time: 3600
+
+    - name: Install required packages
+      ansible.builtin.apt:
+        pkg:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gnupg
+          - software-properties-common
+
+    - name: Create directory for Docker's GPG key
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Ensure the keyring directory exists
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Download Docker's official GPG key
+      ansible.builtin.get_url:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        dest: /etc/apt/keyrings/docker.asc
+        mode: '0644'
+
+
+    - name: Print architecture variables
+      ansible.builtin.debug:
+        msg: "Architecture: {{ ansible_architecture }}, Codename: {{ ansible_lsb.codename }}"
+
+    - name: Add Docker repository
+      ansible.builtin.apt_repository:
+        repo: >-
+          deb [arch={{ arch_mapping[ansible_architecture] | default(ansible_architecture) }}
+          signed-by=/etc/apt/keyrings/docker.asc]
+          https://download.docker.com/linux/ubuntu {{ ansible_lsb.codename }} stable
+        filename: docker
+        state: present
+
+    - name: Install Docker and related packages
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: true
+      loop:
+        - docker-ce
+        - docker-ce-cli
+        - containerd.io
+        - docker-buildx-plugin
+        - docker-compose-plugin
+
+    - name: Add Docker group
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Add user to Docker group
+      ansible.builtin.user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: true
+
+    - name: Enable and start Docker services
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: true
+        state: started
+      loop:
+        - docker.service
+        - containerd.service
+
+    - name: Install required packages
+      apt:
+        pkg:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - gpg
+        state: latest
+    # - name: remove the list
+    #   shell: rm /etc/apt/sources.list.d/docker.list /etc/apt/sources.list.d/kubernetes.list
+
+    - name: Use the k8s apt key
+      get_url:
+        url: https://pkgs.k8s.io/core:/stable:/v1.30/deb/Release.key
+        dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+        mode: "0644"
+
+
+    - name: Download apt key
+      get_url:
+        url: https://packages.cloud.google.com/apt/doc/apt-key.asc
+        dest: /tmp # or /etc/pki/rpm-gpg depending on the infrastructure
+
+    - name: Add a key from a file
+      ansible.builtin.apt_key:
+        file: /tmp/apt-key.asc
+        state: present
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+
+    - name: Install Kubernetes components
+      apt:
+        name:
+          - kubeadm
+          - kubelet
+          - kubectl
+        state: present
+
+
+    - name: Disable Swap
+      command: swapoff -a
+
+    - name: Ensure swap is disabled permanently
+      replace:
+        path: /etc/fstab
+        regexp: '^.*swap.*$'
+        replace: ''
+
+    - name: Load required kernel modules
+      shell: |
+        cat <<EOF | tee /etc/modules-load.d/k8s.conf
+        overlay
+        br_netfilter
+        EOF
+        modprobe overlay
+        modprobe br_netfilter
+
+    - name: Set required sysctl params
+      shell: |
+        cat <<EOF | tee /etc/sysctl.d/k8s.conf
+        net.bridge.bridge-nf-call-ip6tables = 1
+        net.bridge.bridge-nf-call-iptables = 1
+        EOF
+        sysctl --system
+
+    - name: Enable and restart Kubelet
+      systemd:
+        name: kubelet
+        enabled: yes
+        state: restarted
+
+- name: Initialize Kubernetes Master
+  hosts: master
+  become: true
+  tasks:
+
+    - name: Pull required images
+      command: kubeadm config images pull
+
+    - name: Initialize Kubernetes Cluster
+      command: kubeadm init --pod-network-cidr=192.168.0.0/16
+      args:
+        creates: /etc/kubernetes/admin.conf
+
+    - name: Create Join Command
+      command: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+
+    - name: Save Join Command to a File
+      copy:
+        content: "{{ join_command.stdout }}"
+        dest: /tmp/join_command.sh
+      delegate_to: localhost
+      become: false
+
+    - name: Create .kube directory for user
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Copy kubeconfig to user directory
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        remote_src: yes
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+
+    - name: Install Calico Network Plugin
+      command: kubectl apply -f https://docs.projectcalico.org/manifests/calico.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Generate join command
+      command: kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
+
+    - name: Save join command to a file
+      copy:
+        content: "{{ join_command.stdout }}"
+        dest: /tmp/kube_join.sh
+        mode: '0755'
+
+# # add_worker_node.yaml
+
+# - name: Get join command from master
+#   hosts: master
+#   become: true
+#   tasks:
+#     - name: Get kubeadm join command
+#       command: kubeadm token create --print-join-command
+#       register: join_command
+
+# - name: Join worker nodes to the cluster
+#   hosts: workers
+#   become: true
+#   tasks:
+#     - name: Execute join command
+#       command: "{{ hostvars[groups['master'][0]].join_command.stdout }} --cri-socket /var/run/cri-dockerd.sock  --ignore-preflight-errors=NumCPU,Mem"
+
+#     - name: Label the node
+#       command: kubectl label node {{ inventory_hostname }} node-role.kubernetes.io/worker=worker
+#       delegate_to: master
