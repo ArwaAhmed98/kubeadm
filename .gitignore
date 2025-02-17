@@ -36,3 +36,5 @@ override.tf.json
 .vscode/
 *.swp
 *.swo
+Terraform/terraform.tfstate
+Terraform/terraform.tfstate.backup

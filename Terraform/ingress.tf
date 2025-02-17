@@ -1,30 +1,30 @@
-# resource "helm_release" "ingress_nginx" {
-#   name       = "ingress-nginx"                              # The release name for the Helm chart
-#   repository = "https://kubernetes.github.io/ingress-nginx" # Reference the repository URL from the helm_repository resource
-#   chart      = "ingress-nginx"                              # The chart name in the repository
-#   version    = "4.9.0"                                      # Specify a version if needed, or use "latest"
+resource "helm_release" "ingress_nginx" {
+  name       = "ingress-nginx"                              # The release name for the Helm chart
+  repository = "https://kubernetes.github.io/ingress-nginx" # Reference the repository URL from the helm_repository resource
+  chart      = "ingress-nginx"                              # The chart name in the repository
+  version    = "4.9.0"                                      # Specify a version if needed, or use "latest"
 
-#   # Set custom values using the provided values.yaml configuration
-#   values = [yamlencode({
-#     controller = {
-#       metrics = {
-#         enabled = true
-#       }
-#       podAnnotations = {
-#         "controller.metrics.service.servicePort" = "9090"
-#         "prometheus.io/port"                     = "10254"
-#         "prometheus.io/scrape"                   = "true"
-#       }
-#       replicaCount = 2
-#       service = {
-#         type = "LoadBalancer"
-#       }
-#     }
-#   })]
+  # Set custom values using the provided values.yaml configuration
+  values = [yamlencode({
+    controller = {
+      metrics = {
+        enabled = true
+      }
+      podAnnotations = {
+        "controller.metrics.service.servicePort" = "9090"
+        "prometheus.io/port"                     = "10254"
+        "prometheus.io/scrape"                   = "true"
+      }
+      replicaCount = 2
+      service = {
+        type = "LoadBalancer"
+      }
+    }
+  })]
 
-#   # Optionally, specify the namespace (default is used if not specified)
-#   namespace = "default" # Adjust the namespace if needed
-# }
+  # Optionally, specify the namespace (default is used if not specified)
+  namespace = "default" # Adjust the namespace if needed
+}
 
 
 # # helm install kube-prometheus prometheus-community/kube-prometheus-stack -n monitoring -f manifests/values.yml

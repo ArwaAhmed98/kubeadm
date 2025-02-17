@@ -162,30 +162,13 @@
         kubeadm token create --print-join-command
       register: join_node_token
       changed_when: false
-
-    # - name: Save join command
-    #   copy:
-    #     content: "{{ join_command.stdout }}"
-    #     dest: /tmp/k8s_join.sh
-    #     mode: '0755'
-
-    # - name: Copy PEM file to master node
-    #   copy:
-    #     src: eks-terraform-key.pem
-    #     dest: /home/ec2-user/eks-terraform-key.pem
-    #     owner: ec2-user
-    #     group: ec2-user
-    #     mode: '0400'
-
-
-    # - name: Get the token for joining the worker nodes
-    #   become: yes
-    #   become_user: ec2-user
-    #   shell: kubeadm token create --print-join-command
-    #   register: join_node_token
-    #   delegate_to: master
-
-
+      
+    - name: Fetch kubeconfig file to local machine
+      fetch:
+        src: /home/ec2-user/.kube/config
+        dest: ~/.kube/config
+        flat: yes
+ 
 
 - name: Join Worker Nodes to cluster
   hosts: workers
@@ -210,7 +193,7 @@
 
     - name: Save join token command as variable
       ansible.builtin.set_fact:
-        join_node: "{{ hostvars['master'].join_node_token.stdout_lines[0] }}"
+        join_node: "{{ hostvars['private_master'].join_node_token.stdout_lines[0] }}"
 
     - name: add worker nodes to cluster
       shell: "sudo {{ join_node }}"
