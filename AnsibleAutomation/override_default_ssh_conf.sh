@@ -34,4 +34,4 @@ EOF
 
 
 cd ../Terraform/private-key/
-ansible-playbook -i inventory.ini hello.yml 
+ansible-playbook -i inventory.ini hello.yml
