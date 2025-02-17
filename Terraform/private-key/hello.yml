@@ -163,12 +163,6 @@
       register: join_node_token
       changed_when: false
       
-    - name: Fetch kubeconfig file to local machine
-      fetch:
-        src: /home/ec2-user/.kube/config
-        dest: ~/.kube/config
-        flat: yes
- 
 
 - name: Join Worker Nodes to cluster
   hosts: workers
